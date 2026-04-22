@@ -7,11 +7,13 @@
 	import StageCard from '$lib/components/ui/custom/stage-card.svelte';
 	import SuggestedActions from '$lib/components/ui/custom/suggested-actions.svelte';
 	import PlaybackControls from '$lib/components/ui/custom/playback-controls.svelte';
+	import PlantSchematic from '$lib/components/ui/custom/plant-schematic.svelte';
 	import {
 		fetchChunk,
 		startSessions,
 		endSessions,
-		streamWindow
+		streamWindow,
+		fetchSuggestions
 	} from '$lib/api/swat.js';
 
 	// Mirrors src/lib/server/newton.js STAGE_COLUMNS; kept in sync manually.
@@ -80,6 +82,27 @@
 		Object.fromEntries(sessions.map((s) => [s.stageId, s.sessionId]))
 	);
 	let sessionIds = $derived(sessions.map((s) => s.sessionId));
+
+	// Gate P6 classification on activity. P6 is the backwash loop — when FIT601 ≈ 0
+	// the stage is idle/standby and Newton's classification is essentially noise
+	// (flat sensor values + sparse attack-class examples for P6 in the n-shot corpus).
+	// Only trust the classification when the backwash is actually flowing.
+	const P6_ACTIVITY_THRESHOLD = 0.01;
+	let aiSuggestions = $state(null);
+	let suggestionSource = $state('rules');
+	let suggestionSignature = $state('');
+	let suggestionDebounce = null;
+
+	let effectiveStatuses = $derived.by(() => {
+		const out = { ...stageStatuses };
+		if (sessionStatus === 'active' && liveRow) {
+			const flow = parseFloat(liveRow.FIT601 ?? '0');
+			if (!isNaN(flow) && flow < P6_ACTIVITY_THRESHOLD) {
+				out.P6 = 'standby';
+			}
+		}
+		return out;
+	});
 
 	async function loadInitialChunk() {
 		loadingChunk = true;
@@ -160,6 +183,7 @@
 				openStageSSE(s.stageId, s.sseUrl);
 				stageStatuses[s.stageId] = 'pending';
 			}
+			preWarmSessions(2);
 		} catch (err) {
 			console.error('Session setup failed:', err);
 			sessionStatus = 'error';
@@ -195,6 +219,15 @@
 			streamCounter++;
 		} catch (err) {
 			console.error('Stream failed:', err);
+		}
+	}
+
+	// Pre-warm Newton after sessions come up so the first classifications
+	// land in the streak strip before the user even presses Play — otherwise
+	// there's a ~3 s wall-time gap (at 10× replay) between Play and first result.
+	async function preWarmSessions(count = 2) {
+		for (let i = 0; i < count; i++) {
+			await streamCurrentWindow();
 		}
 	}
 
@@ -241,6 +274,46 @@
 	$effect(() => {
 		loadInitialChunk();
 	});
+
+	// Debounced Newton-suggestion trigger: whenever the set of ATTACK stages changes,
+	// wait ANOMALY_DEBOUNCE_MS for the state to settle, then ask Newton to generate
+	// operator actions. Falls back to rule-based suggestions on error or empty state.
+	const ANOMALY_DEBOUNCE_MS = 2000;
+	let anomalySignature = $derived.by(() => {
+		return ['P1', 'P2', 'P3', 'P4', 'P5', 'P6']
+			.filter((id) => effectiveStatuses[id] === 'attack')
+			.sort()
+			.join(',');
+	});
+
+	$effect(() => {
+		const sig = anomalySignature;
+		if (suggestionDebounce) clearTimeout(suggestionDebounce);
+
+		if (!sig) {
+			aiSuggestions = [];
+			suggestionSource = 'newton';
+			suggestionSignature = '';
+			return;
+		}
+
+		if (sig === suggestionSignature && aiSuggestions) return;
+
+		suggestionSource = 'loading';
+		suggestionDebounce = setTimeout(async () => {
+			try {
+				const result = await fetchSuggestions(effectiveStatuses);
+				if (result.signature !== sig) return; // state moved on while we waited
+				aiSuggestions = result.suggestions ?? [];
+				suggestionSource = result.source ?? 'error';
+				suggestionSignature = sig;
+			} catch (err) {
+				console.error('Suggestions failed:', err);
+				aiSuggestions = null; // fall through to rule-based in the component
+				suggestionSource = 'error';
+			}
+		}, ANOMALY_DEBOUNCE_MS);
+	});
 </script>
 
 <svelte:head><title>Newton · SWaT</title></svelte:head>
@@ -258,7 +331,9 @@
 	</span>
 {/snippet}
 
-<div class="bg-background text-foreground grid h-screen grid-rows-[auto_auto_1fr] overflow-hidden">
+<div
+	class="bg-background text-foreground grid h-screen grid-rows-[auto_auto_auto_1fr] overflow-hidden"
+>
 	<Menubar partnerLogo={partnerSnippet}>
 		{#if sessionStatus === 'active'}
 			<Badge variant="outline" class="text-atai-good font-mono">Newton · 6 sessions active</Badge>
@@ -291,22 +366,36 @@
 	<main id="main-content" class="grid grid-cols-[3fr_1fr] gap-4 overflow-hidden p-4">
 		<h1 class="sr-only">SWaT per-stage anomaly dashboard</h1>
 
-		<section class="grid grid-cols-6 gap-3 overflow-hidden" aria-label="Process stages">
-			{#each STAGE_IDS as stageId}
-				<StageCard
-					{stageId}
-					stageName={STAGE_META[stageId]}
-					columns={STAGE_COLUMNS[stageId]}
-					{liveRow}
-					status={stageStatuses[stageId]}
-					recentLabels={stageLabels[stageId]}
-					class="min-h-0 overflow-hidden"
-				/>
-			{/each}
-		</section>
+		<div class="flex min-h-0 flex-col gap-3 overflow-hidden">
+			<section aria-label="Plant process flow" class="shrink-0">
+				<PlantSchematic stageStatuses={effectiveStatuses} class="max-h-44" />
+			</section>
+
+			<section
+				class="grid min-h-0 flex-1 grid-cols-6 gap-3 overflow-hidden"
+				aria-label="Process stages"
+			>
+				{#each STAGE_IDS as stageId}
+					<StageCard
+						{stageId}
+						stageName={STAGE_META[stageId]}
+						columns={STAGE_COLUMNS[stageId]}
+						{liveRow}
+						status={effectiveStatuses[stageId]}
+						recentLabels={stageLabels[stageId]}
+						class="min-h-0 overflow-hidden"
+					/>
+				{/each}
+			</section>
+		</div>
 
 		<section class="min-h-0 overflow-hidden" aria-label="Suggested actions">
-			<SuggestedActions {stageStatuses} stageNames={STAGE_META} />
+			<SuggestedActions
+				stageStatuses={effectiveStatuses}
+				stageNames={STAGE_META}
+				{aiSuggestions}
+				source={suggestionSource}
+			/>
 		</section>
 	</main>
 

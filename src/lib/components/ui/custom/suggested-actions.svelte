@@ -7,14 +7,31 @@
 	import CircleDotIcon from '@lucide/svelte/icons/circle-dot';
 
 	/**
+	 * @typedef {Object} Suggestion
+	 * @property {string} origin
+	 * @property {string} target
+	 * @property {'upstream'|'local'|'downstream'} direction
+	 * @property {string} text
+	 */
+
+	/**
 	 * @typedef {Object} Props
-	 * @property {Record<string,'normal'|'attack'|'pending'|'idle'>} stageStatuses
+	 * @property {Record<string,'normal'|'attack'|'pending'|'idle'|'standby'>} stageStatuses
 	 * @property {Record<string,string>} [stageNames]
+	 * @property {Suggestion[]|null} [aiSuggestions] - AI-generated; falls back to hardcoded rules when null
+	 * @property {'newton'|'newton-cached'|'rules'|'loading'|'error'} [source]
 	 * @property {string} [class]
 	 */
 
 	/** @type {Props} */
-	let { stageStatuses, stageNames = {}, class: className, ...restProps } = $props();
+	let {
+		stageStatuses,
+		stageNames = {},
+		aiSuggestions = null,
+		source = 'rules',
+		class: className,
+		...restProps
+	} = $props();
 
 	// Suggestions are framed as recommendations for a human operator.
 	// Not autonomous actions — the design principles rule distinguishes Measure/Reason ("system shows/suggests")
@@ -54,11 +71,9 @@
 
 	const STAGE_ORDER = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6'];
 
-	let anomalous = $derived(
-		STAGE_ORDER.filter((s) => stageStatuses[s] === 'attack')
-	);
+	let anomalous = $derived(STAGE_ORDER.filter((s) => stageStatuses[s] === 'attack'));
 
-	let suggestions = $derived.by(() => {
+	let ruleSuggestions = $derived.by(() => {
 		const out = [];
 		for (const stageId of anomalous) {
 			const rule = RULES[stageId];
@@ -87,6 +102,24 @@
 		return out;
 	});
 
+	// Prefer AI suggestions when available; fall back to rules while loading or on error
+	let suggestions = $derived(aiSuggestions ?? ruleSuggestions);
+
+	const SOURCE_LABEL = {
+		newton: 'Newton reasoning',
+		'newton-cached': 'Newton reasoning (cached)',
+		loading: 'Newton analysing…',
+		rules: 'Rule-based',
+		error: 'Rule-based (fallback)'
+	};
+	const SOURCE_TONE = {
+		newton: 'text-atai-good',
+		'newton-cached': 'text-atai-good',
+		loading: 'text-atai-warning',
+		rules: 'text-muted-foreground',
+		error: 'text-muted-foreground'
+	};
+
 	const ICON_BY_DIR = {
 		upstream: ArrowUpIcon,
 		downstream: ArrowDownIcon,
@@ -95,10 +128,15 @@
 </script>
 
 <BackgroundCard class={cn('flex h-full flex-col gap-3 p-4', className)} {...restProps}>
-	<header class="flex items-baseline justify-between">
-		<h2 class="font-mono text-sm">Suggested actions</h2>
-		<span class="text-muted-foreground font-mono text-xs">
-			{suggestions.length} active · {anomalous.length} stage{anomalous.length === 1 ? '' : 's'}
+	<header class="flex flex-col gap-1">
+		<div class="flex items-baseline justify-between">
+			<h2 class="font-mono text-sm">Suggested actions</h2>
+			<span class="text-muted-foreground font-mono text-xs">
+				{suggestions.length} active · {anomalous.length} stage{anomalous.length === 1 ? '' : 's'}
+			</span>
+		</div>
+		<span class={cn('font-mono text-[10px] uppercase tracking-wider', SOURCE_TONE[source])}>
+			{SOURCE_LABEL[source]}
 		</span>
 	</header>
 

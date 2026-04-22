@@ -2,6 +2,7 @@
 	import { cn } from '$lib/utils.js';
 	import BackgroundCard from '$lib/components/ui/patterns/background-card/index.js';
 	import Badge from '$lib/components/ui/primitives/badge/index.js';
+	import StageSchematic from '$lib/components/ui/custom/stage-schematic.svelte';
 
 	/**
 	 * @typedef {Object} Props
@@ -30,12 +31,11 @@
 		normal: { dot: 'bg-atai-good', pill: 'text-atai-good', label: 'Normal' },
 		attack: { dot: 'bg-atai-critical', pill: 'text-atai-critical', label: 'Attack' },
 		pending: { dot: 'bg-atai-warning', pill: 'text-atai-warning', label: 'Classifying' },
+		standby: { dot: 'bg-muted', pill: 'text-muted-foreground', label: 'Standby' },
 		idle: { dot: 'bg-atai-neutral', pill: 'text-muted-foreground', label: 'Idle' }
 	};
 
 	let tokens = $derived(STATUS_TOKEN[status] ?? STATUS_TOKEN.idle);
-
-	let topSensors = $derived(columns.slice(0, 4));
 
 	function fmt(v) {
 		if (v === undefined || v === null || v === '') return '—';
@@ -56,20 +56,17 @@
 		<Badge variant="outline" class={cn('font-mono text-xs', tokens.pill)}>{tokens.label}</Badge>
 	</header>
 
+	<StageSchematic {stageId} class={cn(status === 'attack' && 'text-atai-critical/70')} />
+
 	<p class="font-mono text-sm leading-tight">{stageName}</p>
 
 	<dl class="flex flex-col gap-1 text-xs">
-		{#each topSensors as col}
-			<div class="flex items-baseline justify-between">
+		{#each columns as col}
+			<div class="flex items-baseline justify-between gap-2">
 				<dt class="text-muted-foreground font-mono">{col}</dt>
 				<dd class="font-mono">{fmt(liveRow?.[col])}</dd>
 			</div>
 		{/each}
-		{#if columns.length > topSensors.length}
-			<div class="text-muted-foreground mt-1 font-mono text-[10px]">
-				+{columns.length - topSensors.length} more sensors
-			</div>
-		{/if}
 	</dl>
 
 	{#if recentLabels.length > 0}

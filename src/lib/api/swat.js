@@ -53,3 +53,13 @@ export async function streamWindow(sessionMap, rows, counter) {
 	if (!res.ok) throw new Error('Stream failed');
 	return res.json();
 }
+
+export async function fetchSuggestions(stageStatuses) {
+	const res = await fetch('/api/suggestions', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ stageStatuses })
+	});
+	if (!res.ok) throw new Error('Suggestions failed');
+	return res.json();
+}

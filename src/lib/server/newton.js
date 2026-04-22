@@ -237,3 +237,45 @@ export async function destroyAllSessions(sessionIds) {
 		)
 	);
 }
+
+// Direct text query to Newton's reasoning model — used to generate action
+// suggestions from a structured plant-state snapshot. 60s timeout because
+// /query latency is 10-30s for longer prompts.
+export async function queryNewton({ query, systemPrompt = '', maxNewTokens = 1024 }) {
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), 60000);
+	try {
+		const res = await fetch(apiUrl('/query'), {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${ATAI_API_KEY}`,
+				'Content-Type': 'application/json'
+			},
+			body: JSON.stringify({
+				query,
+				system_prompt: systemPrompt,
+				instruction_prompt: systemPrompt,
+				file_ids: [],
+				model: 'Newton::c2_4_7b_251215a172f6d7',
+				max_new_tokens: maxNewTokens,
+				sanitize: false
+			}),
+			signal: controller.signal
+		});
+		if (!res.ok) {
+			const err = await res.json().catch(() => ({}));
+			throw new Error(`query failed: ${res.status} - ${JSON.stringify(err)}`);
+		}
+		const data = await res.json();
+		// Unwrap per skill docs: data.response.response[0] is the canonical shape
+		if (data.response?.response && Array.isArray(data.response.response)) {
+			return data.response.response[0] || '';
+		}
+		if (Array.isArray(data.response)) return data.response[0] || '';
+		if (typeof data.response === 'string') return data.response;
+		if (data.text) return data.text;
+		return '';
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
