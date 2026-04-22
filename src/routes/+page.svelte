@@ -76,12 +76,19 @@
 
 	let stageStatuses = $state(Object.fromEntries(STAGE_IDS.map((s) => [s, 'idle'])));
 	let stageLabels = $state(Object.fromEntries(STAGE_IDS.map((s) => [s, []])));
+	// Tracks which per-stage SSE streams have delivered at least one inference result.
+	// Play stays disabled until all 6 are ready, so the user can't advance the playhead
+	// into a state where some stages silently produce nothing (the P4-stuck scenario).
+	let stagesReady = $state(Object.fromEntries(STAGE_IDS.map((s) => [s, false])));
 
 	let liveRow = $derived(rows[playheadIdx] ?? null);
 	let sessionMap = $derived(
 		Object.fromEntries(sessions.map((s) => [s.stageId, s.sessionId]))
 	);
 	let sessionIds = $derived(sessions.map((s) => s.sessionId));
+	let readyCount = $derived(STAGE_IDS.filter((s) => stagesReady[s]).length);
+	let allStagesReady = $derived(sessions.length > 0 && readyCount === STAGE_IDS.length);
+	let warmingUp = $derived(sessionStatus === 'active' && !allStagesReady);
 
 	// Gate P6 classification on activity. P6 is the backwash loop — when FIT601 ≈ 0
 	// the stage is idle/standby and Newton's classification is essentially noise
@@ -158,6 +165,7 @@
 			stageLabels[stageId] = [...stageLabels[stageId], upper].slice(-20);
 			stageStatuses[stageId] =
 				upper === 'ATTACK' ? 'attack' : upper === 'NORMAL' ? 'normal' : 'pending';
+			stagesReady[stageId] = true;
 		};
 		es.onerror = () => {
 			// Keep EventSource — browser will auto-reconnect. No need to recreate here.
@@ -206,6 +214,7 @@
 		sessionStatus = 'idle';
 		stageStatuses = Object.fromEntries(STAGE_IDS.map((s) => [s, 'idle']));
 		stageLabels = Object.fromEntries(STAGE_IDS.map((s) => [s, []]));
+		stagesReady = Object.fromEntries(STAGE_IDS.map((s) => [s, false]));
 	}
 
 	async function streamCurrentWindow() {
@@ -225,7 +234,7 @@
 	// Pre-warm Newton after sessions come up so the first classifications
 	// land in the streak strip before the user even presses Play — otherwise
 	// there's a ~3 s wall-time gap (at 10× replay) between Play and first result.
-	async function preWarmSessions(count = 2) {
+	async function preWarmSessions(count = 5) {
 		for (let i = 0; i < count; i++) {
 			await streamCurrentWindow();
 		}
@@ -335,8 +344,14 @@
 	class="bg-background text-foreground grid h-screen grid-rows-[auto_auto_auto_1fr] overflow-hidden"
 >
 	<Menubar partnerLogo={partnerSnippet}>
-		{#if sessionStatus === 'active'}
-			<Badge variant="outline" class="text-atai-good font-mono">Newton · 6 sessions active</Badge>
+		{#if sessionStatus === 'active' && warmingUp}
+			<Badge variant="outline" class="text-atai-warning font-mono">
+				<SpinnerIcon class="size-3 animate-spin" aria-hidden="true" />
+				Warming up · {readyCount}/{STAGE_IDS.length} stages ready
+			</Badge>
+			<Button variant="outline" size="sm" onclick={handleStop}>Stop</Button>
+		{:else if sessionStatus === 'active'}
+			<Badge variant="outline" class="text-atai-good font-mono">Newton · 6 sessions ready</Badge>
 			<Button variant="outline" size="sm" onclick={handleStop}>Stop</Button>
 		{:else if sessionStatus === 'connecting'}
 			<Button variant="default" size="sm" disabled>
@@ -356,7 +371,7 @@
 			current={startOffset + playheadIdx}
 			{total}
 			speed={REPLAY_SPEED}
-			disabled={!rows.length}
+			disabled={!rows.length || warmingUp}
 			onplay={handlePlay}
 			onpause={handlePause}
 			onreset={handleReset}
