@@ -1,8 +1,5 @@
 node_modules
 
-# Large local datasets — not committed
-data/*.csv
-
 # Output
 .output
 .vercel
