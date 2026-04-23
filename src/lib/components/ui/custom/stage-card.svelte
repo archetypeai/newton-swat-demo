@@ -30,8 +30,11 @@
 	const STATUS_TOKEN = {
 		normal: { dot: 'bg-atai-good', pill: 'text-atai-good', label: 'Normal' },
 		attack: { dot: 'bg-atai-critical', pill: 'text-atai-critical', label: 'Attack' },
+		warmup: { dot: 'bg-atai-warning', pill: 'text-atai-warning', label: 'Warming up' },
 		pending: { dot: 'bg-atai-warning', pill: 'text-atai-warning', label: 'Classifying' },
+		ready: { dot: 'bg-atai-good', pill: 'text-atai-good', label: 'Ready' },
 		standby: { dot: 'bg-muted', pill: 'text-muted-foreground', label: 'Standby' },
+		unmonitored: { dot: 'bg-muted', pill: 'text-muted-foreground', label: 'Not monitored' },
 		idle: { dot: 'bg-atai-neutral', pill: 'text-muted-foreground', label: 'Idle' }
 	};
 

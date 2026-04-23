@@ -31,6 +31,11 @@ export const STAGE_COLUMNS = {
 	P6: ['FIT601', 'P602']
 };
 export const STAGE_IDS = Object.keys(STAGE_COLUMNS);
+// All six stages get Newton sessions. The client orchestrates fully-serial setup
+// (create → pre-warm → wait for inference.result) so Newton only has one session
+// actively inferencing at a time during setup.
+// All 6 stages monitored. Parallel mount confirmed working at 2 stages.
+export const MONITORED_STAGE_IDS = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6'];
 
 function apiUrl(path) {
 	return `${ATAI_API_ENDPOINT.replace(/\/$/, '')}/${API_VERSION}${path}`;
@@ -107,9 +112,12 @@ async function waitForSession(sessionId, maxWaitMs = 60000) {
 	return false;
 }
 
+// Matches drilling-demo's known-working config — smaller windows appeared to
+// cause OmegaEncoder to silently skip emitting inference.result events, only
+// ACKing data via session.modify.result.
 export const DEFAULT_CONFIG = {
-	windowSize: 30,
-	stepSize: 30,
+	windowSize: 128,
+	stepSize: 128,
 	nNeighbors: 3,
 	metric: 'euclidean',
 	weights: 'uniform',
@@ -126,10 +134,14 @@ async function ensureNShotUploaded(onStep) {
 		onStep('Reusing cached n-shot uploads...');
 		return;
 	}
-	onStep('Uploading normal n-shot examples...');
+	// Full 2,000-row n-shot files. 256-row files were giving KNN libraries of only
+	// 4 embeddings per stage — too thin for k=3 KNN to find meaningful matches, so
+	// Newton returned "unknown" instead of ATTACK/NORMAL. Full files give ~15
+	// embeddings per class × 2 classes = 30-embedding library per stage.
+	onStep('Uploading normal n-shot examples (2,000 rows)...');
 	const normalUpload = await uploadFile(resolve('data/swat_normal.csv'));
 	cachedNormalFileId = normalUpload.file_id;
-	onStep('Uploading attack n-shot examples...');
+	onStep('Uploading attack n-shot examples (2,000 rows)...');
 	const attackUpload = await uploadFile(resolve('data/swat_attack.csv'));
 	cachedAttackFileId = attackUpload.file_id;
 }
@@ -175,6 +187,25 @@ async function createStageSession(stageId, cfg, batchTag) {
 	return { stageId, sessionId: session.session_id, lensId: lens.lens_id };
 }
 
+// Tracks whether we've done the one-time setup cleanup for the current Start cycle.
+// cleanStaleLenses deletes ALL lenses matching our prefix — calling it per-stage
+// was destroying previously-created lenses as new ones came online.
+let setupCleanupDone = false;
+
+// Used by /api/session/one — client orchestrates per-stage setup to ensure
+// Newton only has one session actively inferencing at a time during warmup.
+export async function createOneStageSessionWithProgress(onStep, stageId, config = {}) {
+	const cfg = { ...DEFAULT_CONFIG, ...config };
+	if (!setupCleanupDone) {
+		onStep('Cleaning stale lenses (one-time)...');
+		await cleanStaleLenses();
+		setupCleanupDone = true;
+	}
+	await ensureNShotUploaded(onStep);
+	const batchTag = Date.now();
+	return createStageSession(stageId, cfg, batchTag);
+}
+
 export async function createAllStageSessionsWithProgress(onStep, config = {}) {
 	const cfg = { ...DEFAULT_CONFIG, ...config };
 
@@ -183,11 +214,20 @@ export async function createAllStageSessionsWithProgress(onStep, config = {}) {
 
 	await ensureNShotUploaded(onStep);
 
-	onStep('Starting 6 per-stage sessions in parallel...');
+	// Serial session creation. Previously created all 6 sessions in parallel via
+	// Promise.all, which hit a Newton-side concurrency cliff — the first two
+	// sessions would emit inference.result fine but the other four would stall
+	// and eventually close via sse.stream.end. Creating them one at a time lets
+	// each session fully register and start its inference pipeline before the
+	// next one starts competing for resources.
 	const batchTag = Date.now();
-	const sessions = await Promise.all(
-		STAGE_IDS.map((stageId) => createStageSession(stageId, cfg, batchTag))
-	);
+	const sessions = [];
+	for (let i = 0; i < MONITORED_STAGE_IDS.length; i++) {
+		const stageId = MONITORED_STAGE_IDS[i];
+		onStep(`Starting session ${i + 1}/${MONITORED_STAGE_IDS.length}: ${stageId}...`);
+		const session = await createStageSession(stageId, cfg, batchTag);
+		sessions.push(session);
+	}
 	onStep('All stage sessions ready.');
 	return sessions;
 }
@@ -236,6 +276,8 @@ export async function destroyAllSessions(sessionIds) {
 			apiPost('/lens/sessions/destroy', { session_id: id }).catch(() => {})
 		)
 	);
+	// Next Start cycle should re-clean any stale lenses from prior runs
+	setupCleanupDone = false;
 }
 
 // Direct text query to Newton's reasoning model — used to generate action

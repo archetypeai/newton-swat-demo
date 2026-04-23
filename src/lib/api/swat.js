@@ -36,11 +36,27 @@ export async function startSessions(onStep, config = {}) {
 	});
 }
 
-export async function endSessions(sessionIds) {
+export async function startOneSession(stageId, config = {}) {
+	const res = await fetch('/api/session/one', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ stageId, config })
+	});
+	if (!res.ok) {
+		const err = await res.json().catch(() => ({}));
+		throw new Error(`Session setup failed for ${stageId}: ${err.error || res.status}`);
+	}
+	return res.json();
+}
+
+export async function endSessions(sessionIds, { keepalive = false } = {}) {
+	// keepalive lets the request survive page unload — set when cleaning up on
+	// beforeunload/pagehide so Newton sessions aren't left orphaned.
 	await fetch('/api/session', {
 		method: 'DELETE',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ sessionIds })
+		body: JSON.stringify({ sessionIds }),
+		keepalive
 	});
 }
 
@@ -54,11 +70,11 @@ export async function streamWindow(sessionMap, rows, counter) {
 	return res.json();
 }
 
-export async function fetchSuggestions(stageStatuses) {
+export async function fetchSuggestions(stageStatuses, stageSensors = {}) {
 	const res = await fetch('/api/suggestions', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ stageStatuses })
+		body: JSON.stringify({ stageStatuses, stageSensors })
 	});
 	if (!res.ok) throw new Error('Suggestions failed');
 	return res.json();

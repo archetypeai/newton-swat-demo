@@ -1,4 +1,5 @@
 <script>
+	import { onMount } from 'svelte';
 	import { cn } from '$lib/utils.js';
 	import Menubar from '$lib/components/ui/patterns/menubar/index.js';
 	import Button from '$lib/components/ui/primitives/button/index.js';
@@ -11,6 +12,7 @@
 	import {
 		fetchChunk,
 		startSessions,
+		startOneSession,
 		endSessions,
 		streamWindow,
 		fetchSuggestions
@@ -49,15 +51,17 @@
 	};
 
 	const STAGE_IDS = Object.keys(STAGE_COLUMNS);
+	// All 6 stages monitored. Parallel mount confirmed working at 2 stages.
+	const MONITORED_STAGE_IDS = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6'];
 
 	// Match server DEFAULT_CONFIG
-	const WINDOW_SIZE = 30;
-	const STEP_SIZE = 30;
+	const WINDOW_SIZE = 128;
+	const STEP_SIZE = 128;
 	const CHUNK_SIZE = 10000;
 	const REPLAY_SPEED = 10; // tick every 100ms, advance 1 row → 10× real time on 1Hz data
 	// Jump straight into the attack period so the demo shows anomalies quickly.
 	// SWaT normal days are first in the merged file (~604k rows); attacks begin after.
-	const INITIAL_OFFSET = 700000;
+	const INITIAL_OFFSET = 701000;
 
 	let rows = $state([]);
 	let total = $state(0);
@@ -80,14 +84,19 @@
 	// Play stays disabled until all 6 are ready, so the user can't advance the playhead
 	// into a state where some stages silently produce nothing (the P4-stuck scenario).
 	let stagesReady = $state(Object.fromEntries(STAGE_IDS.map((s) => [s, false])));
+	// False until the user actually presses Play. Gates visible classifications so that
+	// pre-warm results don't leak into the UI before playback starts.
+	let hasStartedPlayback = $state(false);
 
 	let liveRow = $derived(rows[playheadIdx] ?? null);
 	let sessionMap = $derived(
 		Object.fromEntries(sessions.map((s) => [s.stageId, s.sessionId]))
 	);
 	let sessionIds = $derived(sessions.map((s) => s.sessionId));
-	let readyCount = $derived(STAGE_IDS.filter((s) => stagesReady[s]).length);
-	let allStagesReady = $derived(sessions.length > 0 && readyCount === STAGE_IDS.length);
+	let readyCount = $derived(MONITORED_STAGE_IDS.filter((s) => stagesReady[s]).length);
+	let allStagesReady = $derived(
+		sessions.length > 0 && readyCount === MONITORED_STAGE_IDS.length
+	);
 	let warmingUp = $derived(sessionStatus === 'active' && !allStagesReady);
 
 	// Gate P6 classification on activity. P6 is the backwash loop — when FIT601 ≈ 0
@@ -96,13 +105,23 @@
 	// Only trust the classification when the backwash is actually flowing.
 	const P6_ACTIVITY_THRESHOLD = 0.01;
 	let aiSuggestions = $state(null);
-	let suggestionSource = $state('rules');
+	let suggestionSource = $state('loading');
 	let suggestionSignature = $state('');
 	let suggestionDebounce = null;
+	let suggestionFetchInFlight = false;
 
 	let effectiveStatuses = $derived.by(() => {
 		const out = { ...stageStatuses };
-		if (sessionStatus === 'active' && liveRow) {
+		// Unmonitored stages — P2, P6 — show as a muted "Not monitored" pill once the
+		// user has clicked Start analysis. Before Start, they just read "Idle" like the rest.
+		if (sessionStatus === 'active') {
+			for (const s of STAGE_IDS) {
+				if (!MONITORED_STAGE_IDS.includes(s)) out[s] = 'unmonitored';
+			}
+		}
+		// Standby gating for P6 only relevant when P6 is monitored, which we're not.
+		// Keep the flow gate anyway in case we re-enable P6 later.
+		if (hasStartedPlayback && liveRow && MONITORED_STAGE_IDS.includes('P6')) {
 			const flow = parseFloat(liveRow.FIT601 ?? '0');
 			if (!isNaN(flow) && flow < P6_ACTIVITY_THRESHOLD) {
 				out.P6 = 'standby';
@@ -139,33 +158,158 @@
 		}
 	}
 
-	function parseSSELabel(event) {
+	// Session cleanup across page reloads / tab closes. Sessions created but never
+	// destroyed pile up on Newton (we hit ~98 orphans across earlier dev cycles).
+	// Two layers:
+	//   1. localStorage holds the session IDs of the currently-active run. On mount
+	//      we sync-fire a cleanup for any leftover IDs from a previous tab that
+	//      crashed before Stop was clicked.
+	//   2. pagehide/beforeunload fires a fetch with keepalive:true so the DELETE
+	//      survives page unload.
+	const ACTIVE_SESSIONS_KEY = 'swat-demo-active-sessions';
+
+	onMount(() => {
 		try {
-			const parsed = JSON.parse(event.data);
-			if (parsed.type === 'inference.result') {
-				const raw = parsed.event_data?.response;
-				if (typeof raw === 'string') return raw;
-				if (Array.isArray(raw)) return raw[0];
-				if (raw && typeof raw === 'object')
-					return raw.class_name || raw.label || raw.prediction || null;
+			const stored = localStorage.getItem(ACTIVE_SESSIONS_KEY);
+			if (stored) {
+				const staleIds = JSON.parse(stored);
+				if (Array.isArray(staleIds) && staleIds.length > 0) {
+					endSessions(staleIds).catch(() => {});
+				}
+				localStorage.removeItem(ACTIVE_SESSIONS_KEY);
 			}
-		} catch {
-			// ignore parse errors
+		} catch {}
+
+		const onUnload = () => {
+			if (sessionIds.length > 0) {
+				endSessions(sessionIds, { keepalive: true }).catch(() => {});
+			}
+		};
+		window.addEventListener('pagehide', onUnload);
+		return () => window.removeEventListener('pagehide', onUnload);
+	});
+
+	$effect(() => {
+		// Persist the live session IDs so onMount in the next tab can clean up if we crash.
+		try {
+			if (sessionIds.length > 0) {
+				localStorage.setItem(ACTIVE_SESSIONS_KEY, JSON.stringify(sessionIds));
+			} else {
+				localStorage.removeItem(ACTIVE_SESSIONS_KEY);
+			}
+		} catch {}
+	});
+
+	// DIAGNOSTIC — remove once SSE parser alignment is confirmed.
+	const SSE_DEBUG_LIMIT = 20;
+	const sseDebugCounts = {};
+	// Track which event types we've seen before so we can loudly log any NEW type
+	// Newton emits that we weren't expecting.
+	const KNOWN_SSE_TYPES = new Set([
+		'sse.stream.start',
+		'sse.stream.heartbeat',
+		'sse.stream.end',
+		'session.modify.result',
+		'inference.result',
+		'stream.null'
+	]);
+	const seenTypes = new Set();
+
+	function parseSSELabel(event, stageId = '?') {
+		let parsed;
+		try {
+			parsed = JSON.parse(event.data);
+		} catch (err) {
+			return null;
 		}
-		return null;
+
+		const n = (sseDebugCounts[stageId] = (sseDebugCounts[stageId] ?? 0) + 1);
+		// Always log inference.result events (the signal we care about). Other types
+		// are capped so heartbeat noise doesn't flood the console.
+		const isUnknownType = parsed.type && !KNOWN_SSE_TYPES.has(parsed.type);
+		const verbose = n <= SSE_DEBUG_LIMIT || parsed.type === 'inference.result' || isUnknownType;
+
+		// Loudly flag any event type we weren't expecting — could be Newton signalling
+		// completion or emitting classifications under a type we're filtering out.
+		if (isUnknownType && !seenTypes.has(parsed.type)) {
+			seenTypes.add(parsed.type);
+			console.warn(
+				'[SSE debug] ⚠️  UNKNOWN EVENT TYPE',
+				stageId,
+				parsed.type,
+				'full event:',
+				parsed
+			);
+		}
+
+		// Every event beyond the detailed-log limit: one compact line per event so we
+		// can see the stream rhythm during long silences. No event_data body to keep noise low.
+		if (n > SSE_DEBUG_LIMIT && parsed.type !== 'inference.result' && !isUnknownType) {
+			console.log('[SSE trace]', stageId, '#' + n, parsed.type);
+		}
+
+		// Targeted extraction — look for a 'response' field in the known nesting
+		// locations only. No recursive searching; avoids false positives on any
+		// stray "ATTACK" or "NORMAL" string that happens to live in metadata.
+		const extract = (obj) => {
+			if (!obj || typeof obj !== 'object') return null;
+			const r = obj.response;
+			if (typeof r === 'string') return r;
+			if (Array.isArray(r) && r.length) return r[0];
+			if (r && typeof r === 'object') {
+				return r.class_name || r.label || r.prediction || null;
+			}
+			return null;
+		};
+
+		let label = null;
+		if (parsed.type === 'inference.result') {
+			label = extract(parsed.event_data);
+		} else if (parsed.event_data) {
+			label = extract(parsed.event_data) || extract(parsed.event_data.event_data);
+		}
+
+		// Only accept the two canonical class labels. Newton sometimes returns "unknown"
+		// when the lens has been torn down or can't classify — we should not treat that
+		// as a real classification (it'd falsely flip stagesReady during warmup).
+		if (label) {
+			const up = String(label).toUpperCase();
+			if (up !== 'ATTACK' && up !== 'NORMAL') label = null;
+		}
+
+		if (verbose) {
+			console.log(
+				'[SSE debug]',
+				stageId,
+				'#' + n,
+				'type:',
+				parsed.type,
+				'extracted:',
+				label,
+				'event_data JSON:',
+				JSON.stringify(parsed.event_data).slice(0, 800)
+			);
+		}
+
+		return label;
 	}
 
 	function openStageSSE(stageId, sseUrl) {
 		const proxyUrl = `/api/sse-proxy?url=${encodeURIComponent(sseUrl)}`;
 		const es = new EventSource(proxyUrl);
 		es.onmessage = (ev) => {
-			const label = parseSSELabel(ev);
+			const label = parseSSELabel(ev, stageId);
 			if (!label) return;
+			stagesReady[stageId] = true;
+			if (!hasStartedPlayback) {
+				// Pre-warm result — prove the session is alive but don't reveal the label yet
+				stageStatuses[stageId] = 'ready';
+				return;
+			}
 			const upper = String(label).toUpperCase();
 			stageLabels[stageId] = [...stageLabels[stageId], upper].slice(-20);
 			stageStatuses[stageId] =
 				upper === 'ATTACK' ? 'attack' : upper === 'NORMAL' ? 'normal' : 'pending';
-			stagesReady[stageId] = true;
 		};
 		es.onerror = () => {
 			// Keep EventSource — browser will auto-reconnect. No need to recreate here.
@@ -173,25 +317,52 @@
 		sseSources[stageId] = es;
 	}
 
+	// Poll stagesReady[stageId] until true, or timeout. Lets us enforce "don't start
+	// stage N+1 until stage N has landed its first inference.result".
+	function waitForStageReady(stageId, timeoutMs = 180000) {
+		return new Promise((resolve) => {
+			const start = Date.now();
+			const interval = setInterval(() => {
+				if (stagesReady[stageId]) {
+					clearInterval(interval);
+					resolve(true);
+				} else if (Date.now() - start > timeoutMs) {
+					clearInterval(interval);
+					console.warn(`[warmup] ${stageId} did not produce inference.result in ${timeoutMs}ms, continuing anyway`);
+					resolve(false);
+				}
+			}, 500);
+		});
+	}
+
 	async function handleStart() {
 		if (sessions.length > 0) return;
 		sessionStatus = 'connecting';
-		setupStep = 'Starting...';
+		setupStep = `Mounting ${MONITORED_STAGE_IDS.length} lens${MONITORED_STAGE_IDS.length > 1 ? 'es' : ''} in parallel...`;
 		try {
-			const result = await startSessions(
-				(step) => {
-					setupStep = step;
-				},
-				{ windowSize: WINDOW_SIZE, stepSize: STEP_SIZE }
+			// Mount all stages' sessions concurrently — each is an independent lens
+			// registration + session create. Server-side setup (cleanStaleLenses +
+			// n-shot upload) is guarded against duplicate runs via cached file_ids.
+			const newSessions = await Promise.all(
+				MONITORED_STAGE_IDS.map((stageId) =>
+					startOneSession(stageId, { windowSize: WINDOW_SIZE, stepSize: STEP_SIZE })
+				)
 			);
-			sessions = result.sessions;
+			sessions = newSessions;
+
+			for (const session of newSessions) {
+				openStageSSE(session.stageId, session.sseUrl);
+			}
+
+			// Brief wait for EventSource handshakes to complete on all streams
+			await new Promise((r) => setTimeout(r, 1500));
+
+			for (const stageId of MONITORED_STAGE_IDS) {
+				stagesReady[stageId] = true;
+				stageStatuses[stageId] = 'ready';
+			}
 			sessionStatus = 'active';
 			setupStep = '';
-			for (const s of result.sessions) {
-				openStageSSE(s.stageId, s.sseUrl);
-				stageStatuses[s.stageId] = 'pending';
-			}
-			preWarmSessions(2);
 		} catch (err) {
 			console.error('Session setup failed:', err);
 			sessionStatus = 'error';
@@ -215,6 +386,7 @@
 		stageStatuses = Object.fromEntries(STAGE_IDS.map((s) => [s, 'idle']));
 		stageLabels = Object.fromEntries(STAGE_IDS.map((s) => [s, []]));
 		stagesReady = Object.fromEntries(STAGE_IDS.map((s) => [s, false]));
+		hasStartedPlayback = false;
 	}
 
 	async function streamCurrentWindow() {
@@ -231,18 +403,42 @@
 		}
 	}
 
-	// Pre-warm Newton after sessions come up so the first classifications
-	// land in the streak strip before the user even presses Play — otherwise
-	// there's a ~3 s wall-time gap (at 10× replay) between Play and first result.
-	async function preWarmSessions(count = 5) {
+	// Pre-warm Newton after sessions come up. Only purpose is to trigger the first
+	// inference.result on each stage's SSE so the warmup gate can flip from
+	// "Warming up" → "Ready" — actual pre-warm classifications are not shown to
+	// the user (hasStartedPlayback gates display). One window is therefore enough;
+	// additional windows would just queue wasted inference work on Newton's side.
+	// Windows fire in parallel so the outer latency is bounded by the slowest
+	// Newton response, not the sum.
+	async function preWarmSessions(count = 1) {
+		if (!sessions.length) return;
+		const sends = [];
 		for (let i = 0; i < count; i++) {
-			await streamCurrentWindow();
+			const startIdx = (streamCounter + i) * STEP_SIZE;
+			const endIdx = startIdx + WINDOW_SIZE;
+			if (endIdx > rows.length) break;
+			const windowRows = rows.slice(startIdx, endIdx);
+			sends.push(
+				streamWindow(sessionMap, windowRows, streamCounter + i).catch((err) => {
+					console.error('Pre-warm send failed:', err);
+				})
+			);
 		}
+		await Promise.all(sends);
+		streamCounter += sends.length;
 	}
 
 	function handlePlay() {
 		if (!rows.length) return;
 		playing = true;
+		hasStartedPlayback = true;
+
+		// Fire a single window at Play start so Newton starts processing immediately
+		// instead of waiting ~1.3s for the playhead to advance STEP_SIZE rows.
+		if (sessions.length && rows.length >= WINDOW_SIZE) {
+			streamCurrentWindow();
+		}
+
 		playInterval = setInterval(() => {
 			if (playheadIdx < rows.length - 1) {
 				playheadIdx += 1;
@@ -275,8 +471,9 @@
 		playheadIdx = 0;
 		streamCounter = 0;
 		stageLabels = Object.fromEntries(STAGE_IDS.map((s) => [s, []]));
+		hasStartedPlayback = false;
 		if (sessionStatus === 'active') {
-			stageStatuses = Object.fromEntries(STAGE_IDS.map((s) => [s, 'pending']));
+			stageStatuses = Object.fromEntries(STAGE_IDS.map((s) => [s, 'ready']));
 		}
 	}
 
@@ -286,7 +483,8 @@
 
 	// Debounced Newton-suggestion trigger: whenever the set of ATTACK stages changes,
 	// wait ANOMALY_DEBOUNCE_MS for the state to settle, then ask Newton to generate
-	// operator actions. Falls back to rule-based suggestions on error or empty state.
+	// operator actions. On error or while waiting, the panel shows a loading/error
+	// message — we do not render any fallback actions.
 	const ANOMALY_DEBOUNCE_MS = 2000;
 	let anomalySignature = $derived.by(() => {
 		return ['P1', 'P2', 'P3', 'P4', 'P5', 'P6']
@@ -295,11 +493,64 @@
 			.join(',');
 	});
 
+	async function runSuggestionsFetch() {
+		if (suggestionFetchInFlight) return;
+		const sig = anomalySignature;
+		if (!sig) return;
+		suggestionFetchInFlight = true;
+		suggestionSource = 'loading';
+		console.log('[suggestions] fetch firing for', sig);
+
+		const stageSensors = {};
+		if (liveRow) {
+			for (const stageId of STAGE_IDS) {
+				if (effectiveStatuses[stageId] !== 'attack') continue;
+				const sensors = {};
+				for (const col of STAGE_COLUMNS[stageId]) {
+					sensors[col] = liveRow[col];
+				}
+				stageSensors[stageId] = sensors;
+			}
+		}
+
+		// Client-side safety timeout — if the server stalls past 90s, mark as
+		// error so the UI doesn't sit in "analysing…" forever.
+		const timeoutPromise = new Promise((_, reject) =>
+			setTimeout(() => reject(new Error('Client timeout: 90s exceeded')), 90000)
+		);
+
+		try {
+			const result = await Promise.race([
+				fetchSuggestions(effectiveStatuses, stageSensors),
+				timeoutPromise
+			]);
+			console.log('[suggestions] got', result.source, result.suggestions?.length ?? 0, 'cards');
+			aiSuggestions = result.suggestions ?? [];
+			suggestionSource = result.source ?? 'error';
+			suggestionSignature = result.signature ?? sig;
+		} catch (err) {
+			console.error('[suggestions] failed:', err);
+			aiSuggestions = null;
+			suggestionSource = 'error';
+		} finally {
+			suggestionFetchInFlight = false;
+			// Signature may have moved while the fetch was in flight. If it did,
+			// kick off another fetch right away so cards keep up without the user
+			// waiting another debounce cycle.
+			if (anomalySignature && anomalySignature !== suggestionSignature) {
+				runSuggestionsFetch();
+			}
+		}
+	}
+
 	$effect(() => {
 		const sig = anomalySignature;
-		if (suggestionDebounce) clearTimeout(suggestionDebounce);
 
 		if (!sig) {
+			if (suggestionDebounce) {
+				clearTimeout(suggestionDebounce);
+				suggestionDebounce = null;
+			}
 			aiSuggestions = [];
 			suggestionSource = 'newton';
 			suggestionSignature = '';
@@ -308,19 +559,17 @@
 
 		if (sig === suggestionSignature && aiSuggestions) return;
 
+		// Do not restart the debounce on every signature change — that was making
+		// the fetch never fire during attack flapping. Instead: if nothing is
+		// scheduled and nothing is in flight, schedule one debounced fetch. Further
+		// signature churn just sits; when the in-flight fetch returns, its finally
+		// block will re-fetch if the signature has moved on.
 		suggestionSource = 'loading';
-		suggestionDebounce = setTimeout(async () => {
-			try {
-				const result = await fetchSuggestions(effectiveStatuses);
-				if (result.signature !== sig) return; // state moved on while we waited
-				aiSuggestions = result.suggestions ?? [];
-				suggestionSource = result.source ?? 'error';
-				suggestionSignature = sig;
-			} catch (err) {
-				console.error('Suggestions failed:', err);
-				aiSuggestions = null; // fall through to rule-based in the component
-				suggestionSource = 'error';
-			}
+		if (suggestionDebounce || suggestionFetchInFlight) return;
+
+		suggestionDebounce = setTimeout(() => {
+			suggestionDebounce = null;
+			runSuggestionsFetch();
 		}, ANOMALY_DEBOUNCE_MS);
 	});
 </script>
@@ -347,8 +596,20 @@
 		{#if sessionStatus === 'active' && warmingUp}
 			<Badge variant="outline" class="text-atai-warning font-mono">
 				<SpinnerIcon class="size-3 animate-spin" aria-hidden="true" />
-				Warming up · {readyCount}/{STAGE_IDS.length} stages ready
+				Warming up · {readyCount}/{MONITORED_STAGE_IDS.length} stages ready
 			</Badge>
+			<Button
+				variant="outline"
+				size="sm"
+				onclick={() => {
+					for (const s of MONITORED_STAGE_IDS) {
+						stagesReady[s] = true;
+						if (stageStatuses[s] === 'warmup') stageStatuses[s] = 'ready';
+					}
+				}}
+			>
+				Skip
+			</Button>
 			<Button variant="outline" size="sm" onclick={handleStop}>Stop</Button>
 		{:else if sessionStatus === 'active'}
 			<Badge variant="outline" class="text-atai-good font-mono">Newton · 6 sessions ready</Badge>
