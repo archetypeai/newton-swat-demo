@@ -281,11 +281,12 @@ export async function destroyAllSessions(sessionIds) {
 }
 
 // Direct text query to Newton's reasoning model — used to generate action
-// suggestions from a structured plant-state snapshot. 60s timeout because
-// /query latency is 10-30s for longer prompts.
+// suggestions from a structured plant-state snapshot. 120s timeout: observed
+// /query latencies of 90+s with the 6-stage baseline-aware prompt, so give it
+// headroom without exceeding the 150s client-side safety timeout.
 export async function queryNewton({ query, systemPrompt = '', maxNewTokens = 1024 }) {
 	const controller = new AbortController();
-	const timeoutId = setTimeout(() => controller.abort(), 60000);
+	const timeoutId = setTimeout(() => controller.abort(), 120000);
 	try {
 		const res = await fetch(apiUrl('/query'), {
 			method: 'POST',

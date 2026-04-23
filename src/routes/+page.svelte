@@ -17,6 +17,7 @@
 		streamWindow,
 		fetchSuggestions
 	} from '$lib/api/swat.js';
+	import { fetchSuggestionsDirect } from '$lib/suggestions-direct.js';
 
 	// Mirrors src/lib/server/newton.js STAGE_COLUMNS; kept in sync manually.
 	const STAGE_COLUMNS = {
@@ -109,6 +110,12 @@
 	let suggestionSignature = $state('');
 	let suggestionDebounce = null;
 	let suggestionFetchInFlight = false;
+	// Newton credentials + baselines for the direct-to-Newton suggestions path.
+	// The SvelteKit server route was getting wedged on /query calls, so we now
+	// call Newton from the browser using the apiKey returned with each session.
+	let newtonApiKey = $state(null);
+	let newtonEndpoint = $state(null);
+	let sensorBaselines = $state(null);
 
 	let effectiveStatuses = $derived.by(() => {
 		const out = { ...stageStatuses };
@@ -179,6 +186,16 @@
 				localStorage.removeItem(ACTIVE_SESSIONS_KEY);
 			}
 		} catch {}
+
+		// One-time fetch of precomputed sensor baselines + Newton API endpoint.
+		// Used by the direct-to-Newton suggestions path.
+		fetch('/api/baselines')
+			.then((r) => r.json())
+			.then((data) => {
+				sensorBaselines = data.baselines ?? null;
+				newtonEndpoint = data.endpoint ?? null;
+			})
+			.catch((err) => console.error('[baselines] failed:', err));
 
 		const onUnload = () => {
 			if (sessionIds.length > 0) {
@@ -349,6 +366,8 @@
 				)
 			);
 			sessions = newSessions;
+			// Capture Newton API key so the direct-to-Newton suggestions path can call /query.
+			if (newSessions[0]?.apiKey) newtonApiKey = newSessions[0].apiKey;
 
 			for (const session of newSessions) {
 				openStageSSE(session.stageId, session.sseUrl);
@@ -513,25 +532,48 @@
 			}
 		}
 
-		// Client-side safety timeout — if the server stalls past 90s, mark as
-		// error so the UI doesn't sit in "analysing…" forever.
+		// Client-side safety timeout — if the server stalls past this, mark as
+		// error so the UI doesn't sit in "analysing…" forever. Bumped from 90s to
+		// 150s because Newton /query is reaching that range for the full 6-stage
+		// prompt with baselines.
 		const timeoutPromise = new Promise((_, reject) =>
-			setTimeout(() => reject(new Error('Client timeout: 90s exceeded')), 90000)
+			setTimeout(() => reject(new Error('Client timeout: 150s exceeded')), 150000)
 		);
 
 		try {
-			const result = await Promise.race([
-				fetchSuggestions(effectiveStatuses, stageSensors),
-				timeoutPromise
-			]);
-			console.log('[suggestions] got', result.source, result.suggestions?.length ?? 0, 'cards');
+			// Direct-to-Newton path: browser → Newton /query, bypassing our SvelteKit
+			// route (which was getting wedged at 150s). Falls back to the server
+			// route if credentials or baselines aren't loaded yet.
+			const canCallDirect = newtonApiKey && newtonEndpoint && sensorBaselines;
+			const fetcher = canCallDirect
+				? fetchSuggestionsDirect({
+						apiKey: newtonApiKey,
+						endpoint: newtonEndpoint,
+						baselines: sensorBaselines,
+						stageStatuses: effectiveStatuses,
+						stageSensors
+					})
+				: fetchSuggestions(effectiveStatuses, stageSensors);
+			const result = await Promise.race([fetcher, timeoutPromise]);
+			console.log(
+				'[suggestions]',
+				canCallDirect ? 'direct' : 'server',
+				'got',
+				result.source,
+				result.suggestions?.length ?? 0,
+				'cards'
+			);
 			aiSuggestions = result.suggestions ?? [];
 			suggestionSource = result.source ?? 'error';
 			suggestionSignature = result.signature ?? sig;
 		} catch (err) {
 			console.error('[suggestions] failed:', err);
-			aiSuggestions = null;
+			aiSuggestions = [];
 			suggestionSource = 'error';
+			// Record the signature even on error so the effect doesn't immediately
+			// re-trigger another fetch for the same attack set. Prevents a tight
+			// retry loop when Newton is failing.
+			suggestionSignature = sig;
 		} finally {
 			suggestionFetchInFlight = false;
 			// Signature may have moved while the fetch was in flight. If it did,
