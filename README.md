@@ -2,6 +2,8 @@
 
 Feasibility demo: a water treatment plant paved with sensors, using Newton Machine State Lens to detect per-stage anomalies in real time and surface suggested upstream/downstream actions to an operator.
 
+![SWaT six-stage water treatment dashboard](docs/images/dashboard.png)
+
 ## Concept
 
 Six process stages in sequence:
@@ -128,6 +130,10 @@ Browser                  /api/sse-proxy             Newton SSE
 ```
 
 Each event is parsed by `parseSSELabel()` in `+page.svelte`. The client bucket-sorts results by which EventSource they arrived on → updates `stageStatuses[stageId]` → Svelte propagates that into the card's colored pill, the plant banner's colored dot, and the Suggested Actions rule engine.
+
+### Phase 4 — Reason (Suggested Actions via Newton `/query`)
+
+Whenever the set of anomalous stages changes, the browser calls Newton's `/query` endpoint directly with a structured plant-state snapshot and gets back JSON cards routed to the correct upstream/local/downstream neighbor. The full prompt, request body, response parsing, and reuse notes are in [`docs/suggested-actions-prompt.md`](docs/suggested-actions-prompt.md) — copy it as a template for similar "reason over structured state" flows in other apps.
 
 ### Inside one lens config
 
