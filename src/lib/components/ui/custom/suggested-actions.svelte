@@ -2,6 +2,7 @@
 	import { cn } from '$lib/utils.js';
 	import BackgroundCard from '$lib/components/ui/patterns/background-card/index.js';
 	import Badge from '$lib/components/ui/primitives/badge/index.js';
+	import * as ScrollArea from '$lib/components/ui/primitives/scroll-area/index.js';
 	import ArrowUpIcon from '@lucide/svelte/icons/arrow-up';
 	import ArrowDownIcon from '@lucide/svelte/icons/arrow-down';
 	import CircleDotIcon from '@lucide/svelte/icons/circle-dot';
@@ -85,38 +86,40 @@
 			{/if}
 		</p>
 	{:else}
-		<ul role="list" class="flex flex-col gap-2 overflow-y-auto">
-			{#each suggestions as s}
-				{@const Icon = ICON_BY_DIR[s.direction]}
-				<li
-					role="listitem"
-					class="border-border flex items-start gap-3 rounded-md border p-3"
-				>
-					<Icon
-						class={cn(
-							'mt-0.5 size-4 shrink-0',
-							s.direction === 'local' ? 'text-atai-warning' : 'text-muted-foreground'
-						)}
-						aria-hidden="true"
-					/>
-					<div class="flex min-w-0 flex-1 flex-col gap-1">
-						<div class="flex items-center gap-2">
-							<Badge variant="outline" class="text-atai-critical font-mono text-[10px]">
-								{s.origin} anomaly
-							</Badge>
-							<span class="text-muted-foreground font-mono text-[10px] uppercase">
-								{s.direction}
-							</span>
-							{#if s.direction !== 'local'}
-								<Badge variant="outline" class="font-mono text-[10px]">
-									→ {s.target}
+		<ScrollArea.Root class="min-h-0 flex-1">
+			<ul role="list" class="flex flex-col gap-2 pr-2">
+				{#each suggestions as s}
+					{@const Icon = ICON_BY_DIR[s.direction]}
+					<li
+						role="listitem"
+						class="border-border flex items-start gap-3 rounded-md border p-3"
+					>
+						<Icon
+							class={cn(
+								'mt-0.5 size-4 shrink-0',
+								s.direction === 'local' ? 'text-atai-warning' : 'text-muted-foreground'
+							)}
+							aria-hidden="true"
+						/>
+						<div class="flex min-w-0 flex-1 flex-col gap-1">
+							<div class="flex items-center gap-2">
+								<Badge variant="outline" class="text-atai-critical font-mono text-[10px]">
+									{s.origin} anomaly
 								</Badge>
-							{/if}
+								<span class="text-muted-foreground font-mono text-[10px] uppercase">
+									{s.direction}
+								</span>
+								{#if s.direction !== 'local'}
+									<Badge variant="outline" class="font-mono text-[10px]">
+										→ {s.target}
+									</Badge>
+								{/if}
+							</div>
+							<p class="text-sm">{s.text}</p>
 						</div>
-						<p class="text-sm">{s.text}</p>
-					</div>
-				</li>
-			{/each}
-		</ul>
+					</li>
+				{/each}
+			</ul>
+		</ScrollArea.Root>
 	{/if}
 </BackgroundCard>
