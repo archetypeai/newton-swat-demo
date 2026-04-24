@@ -1,8 +1,8 @@
 # newton-swat-demo
 
-Feasibility demo: a water treatment plant paved with sensors, using Newton Machine State Lens to detect per-stage anomalies in real time and surface suggested upstream/downstream actions to an operator.
-
 ![SWaT six-stage water treatment dashboard](docs/images/dashboard.png)
+
+Feasibility demo: a water treatment plant paved with sensors, using Newton Machine State Lens to detect per-stage anomalies in real time and surface suggested upstream/downstream actions to an operator.
 
 ## Concept
 
