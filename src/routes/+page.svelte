@@ -60,9 +60,11 @@
 	const STEP_SIZE = 128;
 	const CHUNK_SIZE = 10000;
 	const REPLAY_SPEED = 10; // tick every 100ms, advance 1 row → 10× real time on 1Hz data
-	// Jump straight into the attack period so the demo shows anomalies quickly.
-	// SWaT normal days are first in the merged file (~604k rows); attacks begin after.
-	const INITIAL_OFFSET = 701000;
+	// Jump into the attack-dense region. In this prepared dataset the first
+	// attack-labeled row is at 1,387,098 — everything earlier is normal-only,
+	// so starting earlier means the demo never reaches a real attack.
+	// Matches the offset used by newton-swat-demo-direct-query.
+	const INITIAL_OFFSET = 1384000;
 
 	let rows = $state([]);
 	let total = $state(0);

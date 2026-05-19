@@ -177,7 +177,24 @@ The app uses two prod models against the Newton platform — one inside the Lens
 
 For the full prod model catalog across `/query`, Lens, and batch surfaces — and the recommended defaults per use case — see the [`newton-models`](https://github.com/archetypeai/archetypeai-agent-skills/blob/main/skills/newton-models/SKILL.md) skill.
 
-Looking for a stateless alternative that exposes embeddings directly (PCA / UMAP visualization, custom distance metrics, no Lens lifecycle)? See [`newton-swat-demo-direct-query`](https://github.com/archetypeai/newton-swat-demo-direct-query) — same 6-stage dashboard, rebuilt on the direct-`/query` + local KNN pattern.
+### Input normalization
+
+SWaT sensors span three orders of magnitude (flow ~2, level ~570, pressure ~253), and the Machine State Lens encoder runs `normalize_input=False` server-side — what you upload is what the encoder sees. Without pre-normalization the encoder reads bulk-amplitude differences as class signal, the failure mode documented in [`newton-machine-state` → *Normalize before uploading*](https://github.com/archetypeai/archetypeai-agent-skills/blob/main/skills/newton-machine-state/SKILL.md).
+
+The app uses the **global StandardScaler pattern**: a single per-channel `(mean, std)` computed once over the n-shot training pool (`data/scaler.json`, built by `scripts/build-scaler.js`) is applied:
+
+1. To the focus CSVs (`swat_normal.csv`, `swat_attack.csv`) **before they are uploaded** as the Lens's n-shot examples — `uploadFile(..., { normalize: true })` normalizes the CSV in memory and uploads the standardized bytes.
+2. To every streamed window **before it is POSTed** to the live session via `streamWindowToStage`.
+
+The Lens config explicitly passes `normalize_input: false` so the encoder doesn't re-normalize per-window on top of our pre-normalization. Same pattern, same scaler file, same identifier choices as the sibling [`newton-swat-demo-direct-query`](https://github.com/archetypeai/newton-swat-demo-direct-query) repo — the only difference is which Newton API surface carries the encoder call (Lens vs `/query`).
+
+### Playback offset
+
+`INITIAL_OFFSET = 1,384,000` in `src/routes/+page.svelte`. In this prepared dataset the first attack-labeled row is at index 1,387,098 — everything earlier is normal-only, so starting earlier means the demo never reaches a real attack. Same offset as `newton-swat-demo-direct-query`.
+
+### See also
+
+Looking for a stateless alternative that exposes embeddings directly (PCA / UMAP visualization, custom distance metrics, no Lens lifecycle)? See [`newton-swat-demo-direct-query`](https://github.com/archetypeai/newton-swat-demo-direct-query) — same 6-stage dashboard, same n-shot CSVs, same scaler, same model choices, rebuilt on the direct-`/query` + local KNN pattern.
 
 ### Why 6 parallel sessions, not 1 shared
 

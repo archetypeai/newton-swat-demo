@@ -1,9 +1,71 @@
 import { ATAI_API_KEY, ATAI_API_ENDPOINT } from '$env/static/private';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 
 const API_VERSION = 'v0.5';
 const LENS_NAME_PREFIX = 'swat-stage-lens';
+
+// Global per-channel StandardScaler. Pre-normalizing with these fixed stats
+// — and passing normalize_input=false to the Lens — preserves cross-window
+// amplitude signal that per-window normalization would erase. SWaT sensors
+// span 3 orders of magnitude (FIT ~2, LIT ~570, PIT ~253), so applying a
+// single global scaler to BOTH the focus CSVs (pre-upload) and the streamed
+// windows is what lets the encoder see consistent magnitudes everywhere.
+// See data/scaler.json (built by scripts/build-scaler.js) and the
+// newton-machine-state agent skill's "Normalize before uploading" section.
+
+let SCALER = null;
+let SCALER_ERROR = null;
+function ensureScaler() {
+	if (SCALER || SCALER_ERROR) return;
+	const path = resolve('data/scaler.json');
+	if (!existsSync(path)) {
+		SCALER_ERROR = new Error(
+			'Missing data/scaler.json — run `node scripts/build-scaler.js` first.'
+		);
+		return;
+	}
+	SCALER = JSON.parse(readFileSync(path, 'utf-8'));
+}
+
+// Normalize a single sensor value for a given channel. Returns the raw value
+// when the channel isn't in the scaler (defensive, but every SWaT sensor in
+// STAGE_COLUMNS is in data/scaler.json by construction).
+function normalizeValue(col, raw) {
+	ensureScaler();
+	if (SCALER_ERROR) throw SCALER_ERROR;
+	const m = SCALER.mean[col];
+	const s = SCALER.std[col];
+	if (m === undefined || s === undefined) return raw;
+	return (raw - m) / s;
+}
+
+// Read a CSV file, apply the scaler to every numeric column (skip
+// `timestamp`), and return the normalized CSV text. Used pre-upload so the
+// hosted Lens sees pre-scaled values for the n-shot focus CSVs.
+function normalizeCsvBytes(filePath) {
+	const text = readFileSync(filePath, 'utf-8');
+	const lines = text.split(/\r?\n/);
+	if (lines.length < 2) return text;
+	const headers = lines[0].split(',').map((h) => h.trim());
+	const isData = (idx) => idx > 0 && lines[idx].trim().length > 0;
+	const out = [lines[0]];
+	for (let i = 1; i < lines.length; i++) {
+		if (!isData(i)) {
+			out.push(lines[i]);
+			continue;
+		}
+		const cells = lines[i].split(',');
+		const next = headers.map((col, c) => {
+			if (col === 'timestamp') return cells[c];
+			const v = parseFloat(cells[c]);
+			if (Number.isNaN(v)) return cells[c];
+			return normalizeValue(col, v).toString();
+		});
+		out.push(next.join(','));
+	}
+	return out.join('\n');
+}
 
 // SWaT stage → sensor column mapping.
 // Column naming is {TYPE}{STAGE}{ID} — the first digit of the numeric suffix is the stage number.
@@ -72,10 +134,12 @@ async function apiPost(path, body, timeoutMs = 10000) {
 	}
 }
 
-async function uploadFile(filePath) {
+async function uploadFile(filePath, { normalize = false } = {}) {
 	const formData = new FormData();
-	const fileBuffer = readFileSync(filePath);
-	const blob = new Blob([fileBuffer], { type: 'text/csv' });
+	const payload = normalize
+		? new TextEncoder().encode(normalizeCsvBytes(filePath))
+		: readFileSync(filePath);
+	const blob = new Blob([payload], { type: 'text/csv' });
 	formData.append('file', blob, filePath.split('/').pop());
 	const res = await fetch(apiUrl('/files'), {
 		method: 'POST',
@@ -139,10 +203,10 @@ async function ensureNShotUploaded(onStep) {
 	// Newton returned "unknown" instead of ATTACK/NORMAL. Full files give ~15
 	// embeddings per class × 2 classes = 30-embedding library per stage.
 	onStep('Uploading normal n-shot examples (2,000 rows)...');
-	const normalUpload = await uploadFile(resolve('data/swat_normal.csv'));
+	const normalUpload = await uploadFile(resolve('data/swat_normal.csv'), { normalize: true });
 	cachedNormalFileId = normalUpload.file_id;
 	onStep('Uploading attack n-shot examples (2,000 rows)...');
-	const attackUpload = await uploadFile(resolve('data/swat_attack.csv'));
+	const attackUpload = await uploadFile(resolve('data/swat_attack.csv'), { normalize: true });
 	cachedAttackFileId = attackUpload.file_id;
 }
 
@@ -157,7 +221,12 @@ async function createStageSession(stageId, cfg, batchTag) {
 			model_parameters: {
 				model_name: 'OmegaEncoder',
 				model_version: 'OmegaEncoder::omega_embeddings_1_4',
-				normalize_input: true,
+				// Pre-normalized at the call site (CSVs at upload, windows at stream)
+				// via normalizeValue() with data/scaler.json. Telling the Lens to
+				// re-normalize per-window would erase cross-window amplitude signal
+				// — the bulk-amplitude trick the newton-machine-state skill warns
+				// about under "Normalize before uploading".
+				normalize_input: false,
 				buffer_size: cfg.windowSize,
 				input_n_shot: {
 					NORMAL: cachedNormalFileId,
@@ -234,10 +303,14 @@ export async function createAllStageSessionsWithProgress(onStep, config = {}) {
 
 export async function streamWindowToStage(sessionId, stageId, rows, counter) {
 	const columns = STAGE_COLUMNS[stageId];
+	// Apply the same global scaler used at focus-CSV upload time — keeps the
+	// Lens encoder seeing a single consistent amplitude reference across the
+	// n-shot examples and every runtime window.
 	const sensorData = columns.map((col) =>
 		rows.map((row) => {
 			const v = parseFloat(row[col]);
-			return isNaN(v) ? 0 : v;
+			if (Number.isNaN(v)) return 0;
+			return normalizeValue(col, v);
 		})
 	);
 	return apiPost(
