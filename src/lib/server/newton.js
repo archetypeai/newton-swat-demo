@@ -156,7 +156,7 @@ async function createStageSession(stageId, cfg, batchTag) {
 			],
 			model_parameters: {
 				model_name: 'OmegaEncoder',
-				model_version: 'OmegaEncoder::omega_embeddings_01',
+				model_version: 'OmegaEncoder::omega_embeddings_1_4',
 				normalize_input: true,
 				buffer_size: cfg.windowSize,
 				input_n_shot: {
@@ -299,7 +299,7 @@ export async function queryNewton({ query, systemPrompt = '', maxNewTokens = 102
 				system_prompt: systemPrompt,
 				instruction_prompt: systemPrompt,
 				file_ids: [],
-				model: 'Newton::c2_4_7b_251215a172f6d7',
+				model: 'Newton::c2_5_8b_260413b723a9ab',
 				max_new_tokens: maxNewTokens,
 				sanitize: false
 			}),

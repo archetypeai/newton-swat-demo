@@ -129,7 +129,7 @@ async function createSession(stageId, normalFileId, attackFileId, batchTag) {
 			],
 			model_parameters: {
 				model_name: 'OmegaEncoder',
-				model_version: 'OmegaEncoder::omega_embeddings_01',
+				model_version: 'OmegaEncoder::omega_embeddings_1_4',
 				normalize_input: true,
 				buffer_size: WINDOW_SIZE,
 				input_n_shot: { NORMAL: normalFileId, ATTACK: attackFileId },

@@ -145,7 +145,7 @@ Simplified `/lens/register` body that we send per stage:
   model_pipeline: [{ processor_name: 'lens_timeseries_state_processor' }],
   model_parameters: {
     model_name: 'OmegaEncoder',
-    model_version: 'OmegaEncoder::omega_embeddings_01',
+    model_version: 'OmegaEncoder::omega_embeddings_1_4',
     buffer_size: 30,
     input_n_shot: {
       NORMAL: '<swat_normal.csv file_id>',
@@ -167,6 +167,17 @@ Newton's classifier inside the lens is:
 2. **KNN** (k=3, Euclidean) — find the 3 closest embeddings among the n-shot examples
 3. **Majority vote** → `NORMAL` or `ATTACK`
 4. Result pushed out on the session's SSE stream
+
+### Models
+
+The app uses two prod models against the Newton platform — one inside the Lens and one against `/query`:
+
+- **`OmegaEncoder::omega_embeddings_1_4`** — passed as `model_version` in the per-stage `/lens/register` body. Vectorizes each sliding window inside the Lens; the hosted KNN votes over the n-shot embeddings to emit `NORMAL` / `ATTACK` on the SSE stream. Picked over the older `omega_embeddings_01` because it's the current Lens-side default for Machine State (see [`newton-machine-state`](https://github.com/archetypeai/archetypeai-agent-skills/blob/main/skills/newton-machine-state/SKILL.md)).
+- **`Newton::c2_5_8b_260413b723a9ab`** — passed as `model` in the `/query` body that generates the operator-suggestion JSON cards. Picked over `Newton::c2_4_7b_251215a172f6d7` because side-by-side comparison on the SWaT suggestions prompt showed 9-of-9 valid topology-checked cards every run with the newer 8B model vs 3-of-9 average for the older 4.7B (see [`compare-newton-models.js`](https://github.com/archetypeai/newton-swat-demo-direct-query/blob/main/scripts/compare-newton-models.js) in the sibling repo).
+
+For the full prod model catalog across `/query`, Lens, and batch surfaces — and the recommended defaults per use case — see the [`newton-models`](https://github.com/archetypeai/archetypeai-agent-skills/blob/main/skills/newton-models/SKILL.md) skill.
+
+Looking for a stateless alternative that exposes embeddings directly (PCA / UMAP visualization, custom distance metrics, no Lens lifecycle)? See [`newton-swat-demo-direct-query`](https://github.com/archetypeai/newton-swat-demo-direct-query) — same 6-stage dashboard, rebuilt on the direct-`/query` + local KNN pattern.
 
 ### Why 6 parallel sessions, not 1 shared
 
